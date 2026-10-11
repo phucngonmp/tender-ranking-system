@@ -1,0 +1,505 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoleName {
+  admin
+  member
+}
+
+enum CrawlJobStatus {
+  pending
+  running
+  success
+  failed
+}
+
+enum NotificationChannel {
+  email
+  webhook
+}
+
+enum SourceType {
+  url
+  muasamcong_keyword
+  bidwinner_keyword
+  dauthauasia_keyword
+  gebiz_keyword
+  freetender_keyword
+  samgov_keyword
+}
+
+enum TenderVerdict {
+  GO
+  CONSIDER
+  NO_GO
+}
+
+enum ScoringEvaluatorType {
+  numeric_range
+  list_match
+  date_diff_gte
+  ai_classification
+}
+
+enum ScoringAggregation {
+  best_tier
+  flat_if_any
+}
+
+enum ScoringStatus {
+  pending
+  success
+  failed
+}
+
+enum ClosedTenderStatus {
+  under_evaluation
+  awarded
+}
+
+model Role {
+  id    Int      @id @default(autoincrement())
+  name  RoleName @unique
+  users User[]
+
+  @@map("roles")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  fullName     String   @map("full_name")
+  roleId       Int      @map("role_id")
+  role         Role     @relation(fields: [roleId], references: [id])
+  isActive     Boolean  @default(true) @map("is_active")
+  receiveEmails Boolean @default(false) @map("receive_emails")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  createdSources          Source[]             @relation("SourceCreatedBy")
+  updatedCriteriaProfiles CriteriaProfile[]     @relation("CriteriaProfileUpdatedBy")
+  refreshTokens           RefreshToken[]
+  notificationSettings    NotificationSetting[]
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @map("token_hash")
+  revoked   Boolean  @default(false)
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+model Source {
+  id                   String     @id @default(uuid())
+  name                 String
+  sourceType           SourceType @default(url) @map("source_type")
+  url                  String?
+  keyword              String?
+  // Ngưỡng giá trị gói thầu (VND) để lọc khi crawl — không set thì lấy tất cả.
+  minValue             Decimal?  @map("min_value") @db.Decimal(18, 2)
+  maxValue             Decimal?  @map("max_value") @db.Decimal(18, 2)
+  isActive             Boolean   @default(true) @map("is_active")
+  autoScore            Boolean   @default(true) @map("auto_score")
+  crawlHour            Int       @default(2) @map("crawl_hour")
+  lastCrawledAt        DateTime? @map("last_crawled_at")
+  createdBy            String?   @map("created_by")
+  createdByUser        User?     @relation("SourceCreatedBy", fields: [createdBy], references: [id], onDelete: SetNull)
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  tenders   Tender[]
+  crawlJobs CrawlJob[]
+  closedTenderKeywords ClosedTenderKeyword[]
+
+  @@map("sources")
+}
+
+// Hồ sơ công ty hợp nhất: vừa là tiêu chí đối chiếu gói thầu (industries/technologies/
+// products/keywords/preferredValue*), vừa là hồ sơ năng lực dùng làm bối cảnh cho AI
+// (positioning/services/...). Kích hoạt (isActive) một hồ sơ áp dụng đồng bộ cả hai
+// khía cạnh cho toàn hệ thống — không còn "hồ sơ tiêu chí" và "hồ sơ năng lực" tách rời.
+model CriteriaProfile {
+  id             String   @id @default(uuid())
+  name           String
+  industries     String[]
+  technologies   String[]
+  products       String[]
+  keywords       String[]
+  preferredValueMin Decimal? @map("preferred_value_min") @db.Decimal(18, 2)
+  preferredValueMax Decimal? @map("preferred_value_max") @db.Decimal(18, 2)
+
+  positioning          String?  @db.Text
+  services             String[]
+  productsAndSolutions String[] @map("products_and_solutions")
+  industriesExperience String[] @map("industries_experience")
+  certifications       String[]
+  marketsAndLanguages  String[] @map("markets_and_languages")
+  deliveryModel        String?  @map("delivery_model") @db.Text
+
+  isActive       Boolean  @default(false) @map("is_active")
+  updatedBy      String?  @map("updated_by")
+  updatedByUser  User?    @relation("CriteriaProfileUpdatedBy", fields: [updatedBy], references: [id], onDelete: SetNull)
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  scores TenderScore[]
+
+  @@map("criteria_profiles")
+}
+
+model Tender {
+  id                 String    @id @default(uuid())
+  sourceId           String    @map("source_id")
+  source             Source    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  externalCode       String?   @map("external_code")
+  // Từ khoá cụ thể (trong nhiều từ khoá cách nhau dấu phẩy của Source) đã
+  // tìm ra gói thầu này — Source.keyword có thể là "A, B, C" nhưng mỗi gói
+  // thầu chỉ khớp với đúng 1 trong số đó khi crawl-worker tách và tìm riêng.
+  matchedKeyword     String?   @map("matched_keyword")
+  title              String
+  investor           String?
+  sector             String?
+  estimatedValue     Decimal?  @map("estimated_value") @db.Decimal(18, 2)
+  currency           String?   @default("VND")
+  submissionOpenDate DateTime? @map("submission_open_date")
+  submissionDeadline DateTime? @map("submission_deadline")
+  publishedAt        DateTime? @map("published_at")
+  locality           String?
+  description        String?
+  requirementsText   String?   @map("requirements_text")
+  sourceUrl          String    @map("source_url")
+  contentHash        String    @map("content_hash")
+  firstSeenAt        DateTime  @default(now()) @map("first_seen_at")
+  lastUpdatedAt      DateTime  @updatedAt @map("last_updated_at")
+
+  scores           TenderScore[]
+  attachments      TenderAttachment[]
+  emailHistories   TenderEmailHistory[]
+  scoringHistories ScoringHistory[]
+
+  @@index([sourceId])
+  @@index([externalCode])
+  @@map("tenders")
+}
+
+model TenderScore {
+  id                String          @id @default(uuid())
+  tenderId          String          @map("tender_id")
+  tender            Tender          @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  criteriaProfileId String          @map("criteria_profile_id")
+  criteriaProfile   CriteriaProfile @relation(fields: [criteriaProfileId], references: [id], onDelete: Cascade)
+  aiScore           Int             @map("ai_score")
+  verdict           TenderVerdict   @default(CONSIDER)
+  aiRationale        String          @map("ai_rationale")
+  matchedCriteria   Json            @map("matched_criteria")
+  gaps              Json            @default("[]")
+  riskFlags         Json            @default("[]") @map("risk_flags")
+  recommendedFocus  Json            @default("[]") @map("recommended_focus")
+  ruleScore         Int             @map("rule_score")
+  finalScore        Int             @map("final_score")
+  rubricScore       Int?            @map("rubric_score")
+  rubricBreakdown   Json?           @map("rubric_breakdown")
+  modelUsed         String          @map("model_used")
+  scoredAt          DateTime        @default(now()) @map("scored_at")
+
+  @@index([tenderId])
+  @@index([finalScore])
+  @@map("tender_scores")
+}
+
+model CrawlJob {
+  id           String         @id @default(uuid())
+  sourceId     String         @map("source_id")
+  source       Source         @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  status       CrawlJobStatus @default(pending)
+  itemsFound   Int            @default(0) @map("items_found")
+  errorMessage String?        @map("error_message")
+  startedAt    DateTime?       @map("started_at")
+  finishedAt   DateTime?      @map("finished_at")
+
+  @@index([sourceId])
+  @@map("crawl_jobs")
+}
+
+// Singleton (id always 1) — recipients + send time for the daily top-tenders digest email.
+model EmailDigestSetting {
+  id         Int       @id @default(1)
+  recipients String[]  @default([])
+  isEnabled  Boolean   @default(true) @map("is_enabled")
+  sendHour   Int       @default(8) @map("send_hour")
+  sendMinute Int       @default(0) @map("send_minute")
+  minScore   Int?      @map("min_score")
+  topCount   Int       @default(5) @map("top_count")
+  lastSentAt DateTime? @map("last_sent_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  @@map("email_digest_settings")
+}
+
+model NotificationSetting {
+  id               String               @id @default(uuid())
+  userId           String               @map("user_id")
+  user             User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  channel          NotificationChannel
+  minScoreThreshold Int                 @map("min_score_threshold")
+  isEnabled        Boolean              @default(true) @map("is_enabled")
+
+  @@map("notification_settings")
+}
+
+model TenderAttachment {
+  id           String   @id @default(uuid())
+  tenderId     String   @map("tender_id")
+  tender       Tender   @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  
+  fileName     String   @map("file_name")       
+  originalUrl  String   @map("original_url")    
+  documentType String?  @map("document_type")
+  
+  storagePath  String?  @map("storage_path")
+  fileSize     Int?     @map("file_size")
+
+  downloadStatus String  @default("pending") @map("download_status")
+  downloadError  String? @map("download_error")
+
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@index([tenderId])
+  @@map("tender_attachments")
+}
+
+// Admin-configurable scoring rubric (settings). A group aggregates its tiers
+// either by picking the single best-matching tier (best_tier — most groups)
+// or by awarding a flat bonusPoints if ANY tier condition matches
+// (flat_if_any — e.g. "tiêu chí phụ"). Each tier carries its own evaluator
+// type so a single group (like "Tiêu chí phụ") can mix rule-based and
+// AI-judged conditions.
+model ScoringCriteriaGroup {
+  id          String   @id @default(uuid())
+  name        String
+  description String?  @db.Text
+  order       Int      @default(0)
+  isActive    Boolean  @default(true) @map("is_active")
+  aggregation ScoringAggregation @default(best_tier)
+  bonusPoints Int?     @map("bonus_points")
+  tiers       ScoringCriteriaTier[]
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("scoring_criteria_groups")
+}
+
+model ScoringCriteriaTier {
+  id            String   @id @default(uuid())
+  groupId       String   @map("group_id")
+  group         ScoringCriteriaGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  label         String
+  points        Int
+  order         Int      @default(0)
+  evaluatorType ScoringEvaluatorType @map("evaluator_type")
+  targetField   String?  @map("target_field")
+  aiQuestionKey String?  @map("ai_question_key")
+  config        Json     @default("{}")
+
+  @@index([groupId])
+  @@map("scoring_criteria_tiers")
+}
+
+// Từ khoá tìm kiếm cho bộ crawl "kết quả đấu thầu" (gói thầu đã đóng thầu,
+// trạng thái Đang xét thầu / Có nhà thầu trúng thầu) trên MuaSamCong. Bảng
+// kết quả/nhà thầu hoàn toàn tách biệt khỏi Tender — không đi qua pipeline
+// chấm điểm AI. Từ khoá lấy lại từ Source (loại muasamcong_keyword) đã có
+// sẵn ở trang "Nguồn crawl" thay vì nhập tay lần nữa — sourceId chỉ để biết
+// từ khoá này lấy từ nguồn nào; `keyword` được sao chép tại thời điểm tạo
+// nên không đổi theo nếu Source đổi từ khoá sau đó.
+model ClosedTenderKeyword {
+  id            String    @id @default(uuid())
+  sourceId      String?   @map("source_id")
+  source        Source?   @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  keyword       String
+  isActive      Boolean   @default(true) @map("is_active")
+  crawlHour     Int       @default(3) @map("crawl_hour")
+  lastCrawledAt DateTime? @map("last_crawled_at")
+  createdBy     String?   @map("created_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  results   ClosedTenderResult[]
+  crawlJobs ClosedTenderCrawlJob[]
+
+  @@index([sourceId])
+  @@map("closed_tender_keywords")
+}
+
+model ClosedTenderCrawlJob {
+  id           String              @id @default(uuid())
+  keywordId    String              @map("keyword_id")
+  keyword      ClosedTenderKeyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  status       CrawlJobStatus      @default(pending)
+  itemsFound   Int                 @default(0) @map("items_found")
+  errorMessage String?             @map("error_message")
+  startedAt    DateTime?           @map("started_at")
+  finishedAt   DateTime?           @map("finished_at")
+
+  @@index([keywordId])
+  @@map("closed_tender_crawl_jobs")
+}
+
+// Một gói thầu đã đóng thầu ở trạng thái Đang xét thầu hoặc Có nhà thầu
+// trúng thầu. Với "Đang xét thầu", các trường quyết định/danh sách bỏ thầu
+// chi tiết có thể còn trống — sẽ được điền khi crawl lại lúc đã có KQLCNT.
+model ClosedTenderResult {
+  id             String              @id @default(uuid())
+  keywordId      String              @map("keyword_id")
+  keyword        ClosedTenderKeyword @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+
+  notifyNo       String              @unique @map("notify_no")
+  notifyId       String?             @map("notify_id")
+  inputResultId  String?             @map("input_result_id")
+  matchedKeyword String?             @map("matched_keyword")
+  title          String
+  investor       String?
+  investorCode   String?             @map("investor_code")
+  bidField       String?             @map("bid_field")
+  locality       String?
+  estimatedValue Decimal?            @map("estimated_value") @db.Decimal(18, 2)
+  bidCloseDate   DateTime?           @map("bid_close_date")
+  bidOpenDate    DateTime?           @map("bid_open_date")
+  status         ClosedTenderStatus
+  numBidderJoin  Int?                @map("num_bidder_join")
+
+  decisionNo        String?   @map("decision_no")
+  decisionDate       DateTime? @map("decision_date")
+  decisionAgency     String?   @map("decision_agency")
+  decisionFileId     String?   @map("decision_file_id")
+  decisionFileName   String?   @map("decision_file_name")
+
+  winningContractorNames String[] @default([]) @map("winning_contractor_names")
+  winningPrice           Decimal? @map("winning_price") @db.Decimal(18, 2)
+
+  sourceUrl     String   @map("source_url")
+  firstSeenAt   DateTime @default(now()) @map("first_seen_at")
+  lastUpdatedAt DateTime @updatedAt @map("last_updated_at")
+
+  bidders ClosedTenderBidder[]
+
+  @@index([keywordId])
+  @@index([status])
+  @@map("closed_tender_results")
+}
+
+model ClosedTenderBidder {
+  id       String             @id @default(uuid())
+  resultId String             @map("result_id")
+  result   ClosedTenderResult @relation(fields: [resultId], references: [id], onDelete: Cascade)
+
+  orgCode            String?  @map("org_code")
+  orgFullname        String   @map("org_fullname")
+  taxCode            String?  @map("tax_code")
+  bidPrice           Decimal? @map("bid_price") @db.Decimal(18, 2)
+  finalPrice         Decimal? @map("final_price") @db.Decimal(18, 2)
+  isWinner           Boolean  @default(false) @map("is_winner")
+  winningPrice       Decimal? @map("winning_price") @db.Decimal(18, 2)
+  rankOrReason       String?  @map("rank_or_reason")
+  executionTime      String?  @map("execution_time")
+  contractPeriodText String?  @map("contract_period_text")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  @@index([resultId])
+  @@map("closed_tender_bidders")
+}
+
+// Đánh giá đối thủ bằng AI (tìm kiếm web + so sánh với hồ sơ công ty) — cache
+// theo companyKey (cùng khoá nhóm công ty dùng ở closed-tender-stats) để tránh
+// tốn token mỗi lần user mở lại; chỉ ghi đè khi user bấm "Đánh giá lại".
+model CompetitorAssessment {
+  id              String   @id @default(uuid())
+  companyKey      String   @unique @map("company_key")
+  taxCode         String?  @map("tax_code")
+  orgFullname     String   @map("org_fullname")
+
+  threatLevel     String   @map("threat_level")
+  companySummary  String   @map("company_summary")
+  strengths       String[] @default([])
+  weaknesses      String[] @default([])
+  overlapWithUs   String?  @map("overlap_with_us")
+  recommendations String[] @default([])
+  fullAnalysis    String   @map("full_analysis")
+  sources         Json     @default("[]")
+
+  modelUsed        String  @map("model_used")
+  promptTokens     Int?    @map("prompt_tokens")
+  completionTokens Int?    @map("completion_tokens")
+  totalTokens      Int?    @map("total_tokens")
+
+  requestedBy String?  @map("requested_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("competitor_assessments")
+}
+
+// Lịch sử gửi email thông báo gói thầu — 1 dòng cho mỗi lần gửi (thành công
+// hay thất bại) tới 1 người nhận, để đối soát/tra cứu lại sau này.
+model TenderEmailHistory {
+  id        String   @id @default(uuid())
+  tenderId  String   @map("tender_id")
+  tender    Tender   @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  recipient String
+  subject   String
+  status    String
+  errorMsg  String?  @map("error_msg")
+  sentAt    DateTime @default(now()) @map("sent_at")
+
+  @@index([tenderId])
+  @@index([recipient])
+  @@map("tender_email_histories")
+}
+
+// Cấu hình thông báo (email/webhook) khi có gói thầu mới đáng chú ý — singleton (id luôn = 1).
+model NotificationConfig {
+  id                 Int      @id @default(1)
+  emailsEnabled      Boolean  @default(true) @map("emails_enabled")
+  emailRecipients    String[] @default([]) @map("email_recipients")
+  webhookEnabled     Boolean  @default(false) @map("webhook_enabled")
+  webhookUrl         String?  @map("webhook_url")
+  webhookType        String?  @map("webhook_type")
+  minScoreThreshold  Int      @default(60) @map("min_score_threshold")
+  allowedVerdicts    String[] @default(["GO", "CONSIDER"]) @map("allowed_verdicts")
+  includeAttachments Boolean  @default(false) @map("include_attachments")
+  includeAiAnalysis  Boolean  @default(true) @map("include_ai_analysis")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  @@map("notification_configs")
+}
+
+// Lịch sử mỗi lần chấm điểm AI cho 1 gói thầu (kể cả lỗi) — tách khỏi
+// TenderScore (chỉ lưu kết quả mới nhất) để tra cứu/debug được các lần chấm
+// trước đó (model dùng, token tiêu tốn, lỗi nếu có).
+model ScoringHistory {
+  id               String        @id @default(uuid())
+  tenderId         String        @map("tender_id")
+  tender           Tender        @relation(fields: [tenderId], references: [id], onDelete: Cascade)
+  status           ScoringStatus @default(pending)
+  modelUsed        String?       @map("model_used")
+  score            Int?
+  promptTokens     Int?          @map("prompt_tokens")
+  completionTokens Int?          @map("completion_tokens")
+  totalTokens      Int?          @map("total_tokens")
+  errorMessage     String?       @map("error_message")
+  startedAt        DateTime      @default(now()) @map("started_at")
+  finishedAt       DateTime?     @map("finished_at")
+
+  @@index([tenderId])
+  @@map("scoring_histories")
+}

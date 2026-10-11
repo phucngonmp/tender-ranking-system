@@ -1,0 +1,24 @@
+node_modules/
+dist/
+build/
+.env
+*.log
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Prisma
+apps/backend/generated/
+
+# IDE
+.vscode/
+.idea/
+.gstack/
+
+# Network captures & build caches
+*.har
+*.tsbuildinfo
